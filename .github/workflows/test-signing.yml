@@ -1,0 +1,102 @@
+# 署名の仕組みが動くかを確かめる。
+#
+# 手元の秘密鍵を消す前に、これを一度通すこと。Secrets の値が壊れていても
+# 手元に鍵があるうちなら登録し直せる。
+#
+# 実行: Actions タブから「test-signing」を Run workflow
+
+name: test-signing
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # 署名対象の EXE を作る。中身は何でもよいので最小の .NET コンソールアプリ。
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: 最小の EXE を作る
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path probe | Out-Null
+          Set-Location probe
+          dotnet new console --name Probe --output . | Out-Null
+          dotnet publish -c Release -r win-x64 --self-contained false `
+            -p:PublishSingleFile=true -o out | Out-Null
+          Get-ChildItem out -Filter *.exe | ForEach-Object {
+            Write-Host "作った: $($_.Name)  $($_.Length) バイト"
+          }
+
+      - name: 署名前の状態を見る
+        shell: pwsh
+        run: |
+          # まだ署名していないので NotSigned のはず。
+          Get-ChildItem probe/out -Filter *.exe | ForEach-Object {
+            $s = Get-AuthenticodeSignature $_.FullName
+            Write-Host "$($_.Name): $($s.Status)"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-build
+          path: probe/out/*.exe
+          if-no-files-found: error
+
+  # 本番と同じ再利用可能ワークフローを呼ぶ。
+  # 同一リポジトリなので相対パスで指定できる。
+  sign:
+    needs: build
+    uses: ./.github/workflows/sign-windows.yml
+    with:
+      artifact-name: probe-build
+      files: '*.exe'
+    secrets: inherit
+
+  # 署名済みを取り出して、もう一度自分の目で確かめる。
+  confirm:
+    needs: sign
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed
+          path: signed
+
+      - name: 署名の中身を出す
+        shell: pwsh
+        env:
+          EXPECTED: ${{ secrets.SIGNING_THUMBPRINT }}
+        run: |
+          $expected = $env:EXPECTED -replace '[^0-9A-Fa-f]', ''
+          Get-ChildItem signed -Recurse -Filter *.exe | ForEach-Object {
+            $s = Get-AuthenticodeSignature $_.FullName
+            Write-Host "--- $($_.Name) ---"
+            Write-Host "  Status      : $($s.Status)"
+            Write-Host "  Subject     : $($s.SignerCertificate.Subject)"
+            Write-Host "  Thumbprint  : $($s.SignerCertificate.Thumbprint)"
+            Write-Host "  期待値と一致: $($s.SignerCertificate.Thumbprint -eq $expected)"
+            Write-Host "  有効期限    : $($s.SignerCertificate.NotAfter)"
+            if ($s.TimeStamperCertificate) {
+              Write-Host "  タイムスタンプ: あり ($($s.TimeStamperCertificate.Subject))"
+            } else {
+              Write-Host "  タイムスタンプ: なし"
+            }
+          }
+
+      - name: 信頼ストアに入れると Valid になることを見る
+        shell: pwsh
+        run: |
+          # ここだけ、利用者が証明書を登録したときの見え方を再現する。
+          # 検証本体 (sign-windows.yml) ではこれをやらない。自作自演になるため。
+          $cer = "$env:RUNNER_TEMP\signing.cer"
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/zero-platform-lab/code-signing/master/public/signing.cer" -OutFile $cer -Headers @{ Authorization = "token ${{ github.token }}" } -ErrorAction SilentlyContinue
+          if (-not (Test-Path $cer)) {
+            Write-Host "公開証明書を取得できなかった。この確認は飛ばす。"
+            exit 0
+          }
+          Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+          Get-ChildItem signed -Recurse -Filter *.exe | ForEach-Object {
+            $s = Get-AuthenticodeSignature $_.FullName
+            Write-Host "$($_.Name): 登録後の Status = $($s.Status)  (Valid なら期待どおり)"
+          }
