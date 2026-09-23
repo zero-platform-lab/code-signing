@@ -1,18 +1,30 @@
-# アプリ側リポジトリの設定
+# Windows アプリに署名する — アプリ開発者向け
 
-Zero Platform Lab のアプリで Windows 配布物に署名する手順。
-署名の中身は `code-signing` 側にあるので、**アプリ側に書くのは呼び出しだけ**。
+Zero Platform Lab の証明書で、自分のアプリの Windows 配布物に署名する手順。
 
-## 1 回だけやること — Secrets を使えるようにする
+署名の中身は [code-signing](https://github.com/zero-platform-lab/code-signing) 側に
+あるので、**アプリ側に書くのは呼び出しだけ**。10 行ほど。
 
-Organization Secrets は既定で全リポジトリには見えない。対象に加える。
+## 前提
 
-```bash
-gh secret set SIGNING_PFX_BASE64 --org zero-platform-lab \
-  --visibility selected --repos code-signing,app-a,app-b < secrets/signing.pfx.b64
+**リポジトリが Public であること。**
+
+- 署名は「他人に配る配布物が改ざんされていないこと」を示す仕組み。
+  公開しない配布物に署名する意味はない
+- GitHub Free プランでは、Organization Secrets は Public リポジトリでしか使えない
+
+Private のまま進めると、原因の分かりにくいエラーで止まる。
+
+```
+Secret SIGNING_PFX_BASE64 is required, but not provided while calling.
 ```
 
-`--repos` に**そのリポジトリを追加**する。3 つの Secret すべてで行う。
+これは `secrets: inherit` の書き忘れに見えるが、実際は Secret が
+呼び出し元からも見えていない。
+
+## 1 回だけ、管理者に頼むこと
+
+自分のリポジトリを Organization Secret の対象に加えてもらう。3 つある。
 
 ```
 SIGNING_PFX_BASE64
@@ -20,16 +32,27 @@ SIGNING_PFX_PASSWORD
 SIGNING_THUMBPRINT
 ```
 
+管理者が行う作業:
+
+```bash
+cd ~/code-signing   # secrets/ がある場所
+REPOS=code-signing,あなたのリポジトリ名
+
+gh secret set SIGNING_PFX_BASE64 --org zero-platform-lab \
+  --visibility selected --repos "$REPOS" < secrets/signing.pfx.b64
+gh secret set SIGNING_PFX_PASSWORD --org zero-platform-lab \
+  --visibility selected --repos "$REPOS" < secrets/signing.pfx.password
+grep '^SHA-1' secrets/THUMBPRINT.txt | cut -d: -f2- | tr -d ': \n' |
+  gh secret set SIGNING_THUMBPRINT --org zero-platform-lab \
+    --visibility selected --repos "$REPOS"
+```
+
 Web からなら Organization → Settings → Secrets and variables → Actions で、
 各 Secret の **Repository access** に追加する。
 
-`code-signing` が Private なので、そこの再利用可能ワークフローを他リポジトリから
-呼ぶには、`code-signing` 側の Settings → Actions → General →
-**Access** を「Accessible from repositories in the organization」にしておく。
+## 2. ワークフローを書く
 
-## ワークフローを書く
-
-`.github/workflows/release.yml` に置く例。
+`.github/workflows/release.yml` に置く。タグを打つと動く例。
 
 ```yaml
 name: release
@@ -42,29 +65,28 @@ permissions:
   contents: write        # Release の作成に要る
 
 jobs:
-  # 1. 普通にビルドして、成果物を上げる
+  # ── ビルド。ここは自分のアプリに合わせて書き換える ──
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      # ここは各アプリのビルド手順に置き換える
-      - run: cargo build --release
+      - run: cargo build --release          # 例。dotnet publish でも msbuild でもよい
       - uses: actions/upload-artifact@v4
         with:
           name: windows-build
           path: target/release/*.exe
           if-no-files-found: error
 
-  # 2. 署名する。中身は code-signing 側にある
+  # ── 署名。中身は code-signing 側にある ──
   sign:
     needs: build
-    uses: zero-platform-lab/code-signing/.github/workflows/sign-windows.yml@v1
+    uses: zero-platform-lab/code-signing/.github/workflows/sign-windows.yml@master
     with:
-      artifact-name: windows-build
-      files: '*.exe'
-    secrets: inherit
+      artifact-name: windows-build     # 上で upload した名前
+      files: '*.exe'                   # 署名対象。artifact の中の相対パス
+    secrets: inherit                   # ★ これが無いと動かない
 
-  # 3. 署名済みだけを Release に出す
+  # ── 署名済みだけを Release に出す ──
   release:
     needs: sign
     runs-on: ubuntu-latest
@@ -74,13 +96,11 @@ jobs:
           name: signed
           path: dist
 
-      # 利用者が信頼ストアへ入れるための公開証明書を同梱する
+      # 利用者が検証するための公開証明書と手順を同梱する
       - uses: actions/checkout@v4
         with:
           repository: zero-platform-lab/code-signing
           path: cs
-          sparse-checkout: |
-            public
       - run: cp cs/public/signing.cer cs/public/THUMBPRINT.txt dist/
 
       - uses: softprops/action-gh-release@v2
@@ -89,48 +109,67 @@ jobs:
           body_path: cs/public/RELEASE_NOTE_SNIPPET.md
 ```
 
-**`secrets: inherit` を忘れないこと。** これが無いと Secrets が渡らず、
-再利用可能ワークフローが起動時に失敗する。
+**`secrets: inherit` を忘れないこと。** 一番多い失敗。
 
 ## 入力
 
 | 名前 | 必須 | 既定 | 意味 |
 |---|---|---|---|
 | `artifact-name` | 必須 | | 署名前の成果物の名前 |
-| `files` | 必須 | | 署名対象のパターン。空白区切り。成果物の中の相対パス |
+| `files` | 必須 | | 署名対象。空白区切りで複数可。成果物の中の相対パス |
 | `signed-artifact-name` | | `signed` | 署名後に上げる名前 |
 | `timestamp-url` | | DigiCert | RFC3161 タイムスタンプ局 |
 
 `files` に該当が 1 件も無ければ**失敗する**。黙って素通りはしない。
 
-## 署名対象
+対応形式は `EXE` `DLL` `MSI` `MSIX`。
 
-`EXE` `DLL` `MSI` `MSIX` を想定している。`signtool` が扱える形式なら
-`files` に足せば署名される。検証の走査対象はこの 4 拡張子。
+## 3. 動作を確かめる
 
-## よくある失敗
+タグを打つ。
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Actions のログに次が出れば成功。
+
+```
+署名する 1 件:
+  D:\a\...\work\YourApp.exe
+YourApp.exe: status=UnknownError thumbprint一致=True タイムスタンプ=あり
+```
+
+**`UnknownError` は正常。** 「署名は健全だが、Windows がこの発行元を信頼していない」
+という意味で、自己署名なのでこうなる。`HashMismatch` や `NotSigned` が本当の失敗。
+
+## つまずきやすいところ
 
 | 症状 | 原因 |
 |---|---|
-| ワークフローが起動しない | `secrets: inherit` がない。または Organization Secret の対象に入っていない |
-| `workflow not found` | `code-signing` の Actions Access が組織内に開放されていない |
-| `対象が見つからない: *.exe` | `artifact-name` と `files` の組み合わせが合っていない。`path:` 直下からの相対 |
-| 署名は通るが検証で落ちる | `SIGNING_THUMBPRINT` が古い。証明書を更新したのに Secret を直していない |
+| `Secret ... is required, but not provided` | `secrets: inherit` が無い。または Organization Secret の対象に入っていない。**リポジトリが Private でも起きる** |
+| `workflow not found` | `uses:` のパスかタグが違う |
+| `対象が見つからない: *.exe` | `artifact-name` と `files` が噛み合っていない。`files` は artifact の中の相対パス |
+| 署名は通るが検証で落ちる | 証明書が更新されたのに Secret が古い。管理者に確認する |
+| タイムスタンプが `なし` | タイムスタンプ局に到達できていない。`timestamp-url` を別の局に変える |
 
-## 検証について知っておくこと
+## 利用者に伝えること
 
-このワークフローは `signtool verify /pa` を使わない。**自己署名なので、
-証明書を信頼ストアに入れていない GitHub のランナーでは必ず落ちるため。**
+Release には `signing.cer` と検証手順が同梱される。利用者は次を知っておく必要がある。
 
-代わりに確認しているのは次の 3 点。
+- 公開 CA の証明書ではないので、**そのままでは「不明な発行元」と表示される**
+- 証明書を信頼ストアに登録すれば `Valid` になる（管理者権限が要る）
+- **SmartScreen の警告は署名では消えない**。ダウンロード実績で判定される仕組み
+- 署名はアプリの安全性を保証しない。改ざんされていないことと発行元の同一性を示すだけ
+
+詳しくは [`public/RELEASE_NOTE_SNIPPET.md`](../public/RELEASE_NOTE_SNIPPET.md)。
+Release の本文にそのまま使える。
+
+## 証明書の情報
 
 ```
-署名の状態が Valid か UnknownError であること
-  UnknownError は「署名は健全だが発行元が未信頼」。自己署名では正常
-  HashMismatch や NotSigned は本当の失敗
-署名者の拇印が SIGNING_THUMBPRINT と一致すること
-タイムスタンプが付いていること
+発行者    CN=Zero Platform Lab, O=Zero Platform Lab
+SHA-256   97:D3:70:0C:CE:4D:0C:06:8D:B0:0E:24:60:48:17:BC:A0:AD:C9:D2:F4:4E:36:07:76:58:41:55:E3:E2:3D:E0
+SHA-1     0E:70:1D:C2:53:14:3D:4E:AA:3C:1F:98:09:4A:D0:EF:10:47:5A:66
+有効期限  2031-09-23
 ```
-
-「Windows が発行元を信頼しているか」ではなく、「**正しい鍵で署名され、
-改ざんされていないか**」を確かめている。
