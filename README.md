@@ -11,12 +11,17 @@ Zero Platform Lab が配布する Windows アプリケーションを、自前�
 ```yaml
   sign:
     needs: build
-    uses: zero-platform-lab/code-signing/.github/workflows/sign-windows.yml@master
+    uses: zero-platform-lab/code-signing/.github/workflows/sign-windows.yml@fb01cf6eb3db81ed14984c26f4c8ea83d408b2a1 # コミットSHAで固定する
     with:
       artifact-name: windows-build
       files: '*.exe'
-    secrets: inherit
+    secrets:                         # 使う3つだけを渡す（secrets: inherit にしない）
+      SIGNING_PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
+      SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+      SIGNING_THUMBPRINT: ${{ secrets.SIGNING_THUMBPRINT }}
 ```
+
+`@master` で呼ばないこと。理由は [docs/for-app-repos.md の「呼び出しの固定」](docs/for-app-repos.md#呼び出しの固定)。
 
 前提が 2 つあります。
 

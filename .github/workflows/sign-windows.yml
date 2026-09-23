@@ -4,11 +4,16 @@
 #
 #   jobs:
 #     sign:
-#       uses: zero-platform-lab/code-signing/.github/workflows/sign-windows.yml@v1
+#       uses: zero-platform-lab/code-signing/.github/workflows/sign-windows.yml@<コミットSHA>
 #       with:
 #         artifact-name: windows-build      # 署名前の成果物（actions/upload-artifact 名）
 #         files: 'dist/*.exe dist/*.dll'    # 署名対象。空白区切り
-#       secrets: inherit
+#       secrets:                            # 使う3つだけを渡す
+#         SIGNING_PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
+#         SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+#         SIGNING_THUMBPRINT: ${{ secrets.SIGNING_THUMBPRINT }}
+#
+# @master で呼ばないこと（docs/for-app-repos.md の「呼び出しの固定」）。
 #
 # 呼び出し側のリポジトリが Organization Secrets を使えるようにしておくこと
 # （Organization の Secrets で visibility を selected にし、対象に含める）。

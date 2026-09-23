@@ -19,7 +19,7 @@ Private のまま進めると、原因の分かりにくいエラーで止まる
 Secret SIGNING_PFX_BASE64 is required, but not provided while calling.
 ```
 
-これは `secrets: inherit` の書き忘れに見えるが、実際は Secret が
+これは `secrets:` の書き忘れに見えるが、実際は Secret が
 呼び出し元からも見えていない。
 
 ## 1 回だけ、管理者に頼むこと
@@ -89,11 +89,15 @@ jobs:
   # ── 署名。中身は code-signing 側にある ──
   sign:
     needs: build
-    uses: zero-platform-lab/code-signing/.github/workflows/sign-windows.yml@master
+    # ★ コミットSHAで固定する（@master にしない）。理由は下の「呼び出しの固定」
+    uses: zero-platform-lab/code-signing/.github/workflows/sign-windows.yml@fb01cf6eb3db81ed14984c26f4c8ea83d408b2a1 # master 2026-09-23
     with:
       artifact-name: windows-build     # 上で upload した名前
       files: '*.exe'                   # 署名対象。artifact の中の相対パス
-    secrets: inherit                   # ★ これが無いと動かない
+    secrets:                           # ★ これが無いと動かない。使う3つだけを渡す
+      SIGNING_PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
+      SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+      SIGNING_THUMBPRINT: ${{ secrets.SIGNING_THUMBPRINT }}
 
   # ── 署名済みだけを Release に出す ──
   release:
@@ -109,16 +113,29 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: zero-platform-lab/code-signing
+          ref: fb01cf6eb3db81ed14984c26f4c8ea83d408b2a1           # 署名と同じコミットの公開証明書を使う
           path: cs
       - run: cp cs/public/signing.cer cs/public/THUMBPRINT.txt dist/
 
-      - uses: softprops/action-gh-release@v2
+      # Release へ書き込む権限を持つので、外部のアクションもコミットSHAで固定する
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
           body_path: cs/public/RELEASE_NOTE_SNIPPET.md
 ```
 
-**`secrets: inherit` を忘れないこと。** 一番多い失敗。
+**`secrets:` を忘れないこと。** 一番多い失敗。
+
+### 呼び出しの固定
+
+- **`uses:` はコミットSHAで固定する。** `@master` だと、このリポジトリに書き込める人
+  （またはその人のトークンを盗んだ人）が `sign-windows.yml` を書き換えたとき、
+  次に署名したすべてのリポジトリの実行で秘密鍵を外へ送れてしまう。
+  master は強制 push と削除を禁止しているので、固定したSHAの中身は変わらない
+- **Secret は3つを名前で渡す。** `secrets: inherit` だと、呼び出し元の Secret が
+  すべて署名ワークフローへ渡る
+- code-signing を更新したら、差分を読んでから各リポジトリのSHAを上げる
+- 実例: [`zero-platform-lab/windows-side-dock` の `release.yml`](https://github.com/zero-platform-lab/windows-side-dock/blob/main/.github/workflows/release.yml)
 
 ## 入力
 
@@ -156,7 +173,7 @@ YourApp.exe: status=UnknownError thumbprint一致=True タイムスタンプ=あ
 
 | 症状 | 原因 |
 |---|---|
-| `Secret ... is required, but not provided` | `secrets: inherit` が無い。または Organization Secret の対象に入っていない。**リポジトリが Private でも起きる** |
+| `Secret ... is required, but not provided` | `secrets:` で3つを渡していない。または Organization Secret の対象に入っていない。**リポジトリが Private でも起きる** |
 | `workflow not found` | `uses:` のパスかタグが違う |
 | `対象が見つからない: *.exe` | `artifact-name` と `files` が噛み合っていない。`files` は artifact の中の相対パス |
 | 署名は通るが検証で落ちる | 証明書が更新されたのに Secret が古い。管理者に確認する |
