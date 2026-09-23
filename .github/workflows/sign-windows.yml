@@ -1,0 +1,151 @@
+# Zero Platform Lab — Windows 配布物への署名（再利用可能ワークフロー）
+#
+# 他リポジトリからこう呼ぶ:
+#
+#   jobs:
+#     sign:
+#       uses: zero-platform-lab/code-signing/.github/workflows/sign-windows.yml@v1
+#       with:
+#         artifact-name: windows-build      # 署名前の成果物（actions/upload-artifact 名）
+#         files: 'dist/*.exe dist/*.dll'    # 署名対象。空白区切り
+#       secrets: inherit
+#
+# 呼び出し側のリポジトリが Organization Secrets を使えるようにしておくこと
+# （Organization の Secrets で visibility を selected にし、対象に含める）。
+
+name: sign-windows
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: 署名前の成果物の名前
+        required: true
+        type: string
+      files:
+        description: 署名対象のパターン。空白区切り
+        required: true
+        type: string
+      signed-artifact-name:
+        description: 署名後に上げる成果物の名前
+        required: false
+        default: signed
+        type: string
+      timestamp-url:
+        description: RFC3161 タイムスタンプ局
+        required: false
+        default: http://timestamp.digicert.com
+        type: string
+    secrets:
+      SIGNING_PFX_BASE64:
+        required: true
+      SIGNING_PFX_PASSWORD:
+        required: true
+      SIGNING_THUMBPRINT:
+        required: true
+
+jobs:
+  sign:
+    runs-on: windows-latest
+    steps:
+      - name: 署名前の成果物を取得
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: work
+
+      - name: signtool を探す
+        id: signtool
+        shell: pwsh
+        run: |
+          # Windows SDK の版はランナーの更新で変わる。決め打ちにせず、最新を選ぶ。
+          $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $tool = Get-ChildItem -Path $sdk -Recurse -Filter signtool.exe -ErrorAction Stop |
+                  Where-Object { $_.FullName -match '\\x64\\' } |
+                  Sort-Object FullName -Descending |
+                  Select-Object -First 1
+          if (-not $tool) { throw 'signtool.exe が見つからない' }
+          "path=$($tool.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host "使う signtool: $($tool.FullName)"
+
+      - name: PFX を復元
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.SIGNING_PFX_BASE64 }}
+        run: |
+          # base64 からファイルへ戻す。中身は出力しない。
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\signing.pfx",
+            [Convert]::FromBase64String($env:PFX_B64))
+          Write-Host "PFX を $env:RUNNER_TEMP に置いた"
+
+      - name: 署名
+        shell: pwsh
+        env:
+          PFX_PASS: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: |
+          $signtool = '${{ steps.signtool.outputs.path }}'
+          $pfx = "$env:RUNNER_TEMP\signing.pfx"
+
+          # 対象を集める。1 件も無ければ失敗させる（黙って素通りさせない）。
+          $targets = @()
+          foreach ($pat in ('${{ inputs.files }}' -split '\s+' | Where-Object { $_ })) {
+            $found = Get-ChildItem -Path (Join-Path 'work' $pat) -File -ErrorAction SilentlyContinue
+            if (-not $found) { throw "対象が見つからない: $pat" }
+            $targets += $found
+          }
+          Write-Host "署名する $($targets.Count) 件:"
+          $targets | ForEach-Object { Write-Host "  $($_.FullName)" }
+
+          # /fd SHA256  ファイルのダイジェスト
+          # /tr, /td    RFC3161 タイムスタンプ。**これが無いと証明書の期限切れで
+          #             過去の署名まで無効になる**
+          foreach ($f in $targets) {
+            & $signtool sign `
+              /f $pfx /p $env:PFX_PASS `
+              /fd SHA256 `
+              /tr '${{ inputs.timestamp-url }}' /td SHA256 `
+              /v $f.FullName
+            if ($LASTEXITCODE -ne 0) { throw "署名に失敗: $($f.FullName)" }
+          }
+
+      - name: 署名を検証
+        shell: pwsh
+        env:
+          EXPECTED: ${{ secrets.SIGNING_THUMBPRINT }}
+        run: |
+          # signtool verify /pa は使わない。
+          # 自己署名なので、証明書を信頼ストアに入れていないランナーでは必ず落ちる。
+          # ここで確かめたいのは「正しい鍵で署名され、改ざんされていないか」であって、
+          # 「Windows が発行元を信頼しているか」ではない。
+          $expected = $env:EXPECTED -replace '[^0-9A-Fa-f]', ''
+          $bad = 0
+          foreach ($f in Get-ChildItem -Path work -Recurse -File |
+                         Where-Object { $_.Extension -in '.exe','.dll','.msi','.msix' }) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            if (-not $sig.SignerCertificate) { continue }
+
+            $thumb = $sig.SignerCertificate.Thumbprint
+            $ts    = if ($sig.TimeStamperCertificate) { 'あり' } else { 'なし' }
+
+            # UnknownError は「署名は健全だが発行元が未信頼」。自己署名では正常。
+            # HashMismatch や NotSigned は本当の失敗。
+            $okStatus = $sig.Status -in 'Valid','UnknownError'
+            $okThumb  = $thumb -eq $expected
+            $okTs     = $null -ne $sig.TimeStamperCertificate
+
+            Write-Host "$($f.Name): status=$($sig.Status) thumbprint一致=$okThumb タイムスタンプ=$ts"
+            if (-not ($okStatus -and $okThumb -and $okTs)) { $bad++ }
+          }
+          if ($bad -gt 0) { throw "$bad 件が検証に失敗した" }
+
+      - name: PFX を消す
+        if: always()
+        shell: pwsh
+        run: Remove-Item "$env:RUNNER_TEMP\signing.pfx" -Force -ErrorAction SilentlyContinue
+
+      - name: 署名済みを上げる
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.signed-artifact-name }}
+          path: work
+          if-no-files-found: error

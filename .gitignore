@@ -1,0 +1,11 @@
+# 秘密鍵とパスワードは絶対にコミットしない。
+secrets/
+*.key
+*.pfx
+*.p12
+*.pfx.b64
+*.password
+
+# 念のため
+*.pem
+!public/*.cer
