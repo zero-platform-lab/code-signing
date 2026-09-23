@@ -58,17 +58,27 @@ grep '^SHA-1' secrets/THUMBPRINT.txt | cut -d: -f2- | tr -d ': \n'; echo
 Organization → Settings → Secrets and variables → Actions で、
 各 Secret の Repository access に追加する。
 
-## 再利用可能ワークフローへの access
+## なぜ code-signing は Public なのか
 
-`code-signing` は Private なので、他リポジトリからワークフローを呼ぶには
-開放が要る。
+**Free プランの制約が 2 つあり、どちらも Private だと詰む。**
 
-```
-code-signing → Settings → Actions → General → Access
-  「Accessible from repositories in the organization」を選ぶ
-```
+| 制約 | 内容 |
+|---|---|
+| Organization Secrets | Private リポジトリでは使えない。**登録は通るのに値が空になる** |
+| 再利用可能ワークフロー | 同一リポジトリか Public リポジトリのものしか呼べない |
 
-これをしないと、呼び出し側が `workflow not found` で失敗する。
+2026-09-23 に Private で試したところ、`Secret ... is required, but not provided
+while calling` で失敗した。エラーからは `secrets: inherit` の問題に見えるが、
+実際は呼び出し元からも見えていなかった。
+
+Public にすれば両方解消する。このリポジトリに秘密情報は無く、むしろ利用者が
+署名と検証の方法を確認できる利点がある。秘密鍵は `secrets/` にあり、
+`.gitignore` で除外してあるので上がらない。
+
+**Private に戻すと、アプリ側から `uses:` で呼べなくなる。**
+
+そもそも署名が要るのは他人に配る配布物、つまり Public リポジトリのものだけ。
+公開しない配布物に署名する意味はない。
 
 ## 手元の後始末 — 方針: 控えを残さない
 
