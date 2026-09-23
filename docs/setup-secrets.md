@@ -54,8 +54,19 @@ grep '^SHA-1' secrets/THUMBPRINT.txt | cut -d: -f2- | tr -d ': \n'; echo
 
 ## アプリを増やすとき
 
-`--repos` に足して 3 つとも登録し直す。Web からなら
-Organization → Settings → Secrets and variables → Actions で、
+**`gh secret set --repos` を使わないこと。** 対象の一覧を丸ごと置き換えるため、
+すでに署名を使っている他のリポジトリが外れる。1 件ずつ追加する。
+
+```bash
+REPO_ID=$(gh api repos/zero-platform-lab/<新しいリポジトリ> --jq .id)
+for s in SIGNING_PFX_BASE64 SIGNING_PFX_PASSWORD SIGNING_THUMBPRINT; do
+  gh api -X PUT "orgs/zero-platform-lab/actions/secrets/$s/repositories/$REPO_ID"
+done
+```
+
+この作業に手元の `secrets/` は要らない。値を触らず、対象だけを足すため。
+
+Web からなら Organization → Settings → Secrets and variables → Actions で、
 各 Secret の Repository access に追加する。
 
 ## なぜ code-signing は Public なのか

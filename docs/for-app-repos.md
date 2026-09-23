@@ -32,19 +32,28 @@ SIGNING_PFX_PASSWORD
 SIGNING_THUMBPRINT
 ```
 
-管理者が行う作業:
+管理者が行う作業。**既存の対象を消さないよう、1 件ずつ追加する。**
 
 ```bash
-cd ~/code-signing   # secrets/ がある場所
-REPOS=code-signing,あなたのリポジトリ名
+REPO_ID=$(gh api repos/zero-platform-lab/あなたのリポジトリ名 --jq .id)
+for s in SIGNING_PFX_BASE64 SIGNING_PFX_PASSWORD SIGNING_THUMBPRINT; do
+  gh api -X PUT "orgs/zero-platform-lab/actions/secrets/$s/repositories/$REPO_ID"
+  echo "$s ok"
+done
+```
 
-gh secret set SIGNING_PFX_BASE64 --org zero-platform-lab \
-  --visibility selected --repos "$REPOS" < secrets/signing.pfx.b64
-gh secret set SIGNING_PFX_PASSWORD --org zero-platform-lab \
-  --visibility selected --repos "$REPOS" < secrets/signing.pfx.password
-grep '^SHA-1' secrets/THUMBPRINT.txt | cut -d: -f2- | tr -d ': \n' |
-  gh secret set SIGNING_THUMBPRINT --org zero-platform-lab \
-    --visibility selected --repos "$REPOS"
+**`gh secret set --repos` は使わないこと。** あれは対象の一覧を丸ごと
+置き換えるので、すでに署名を使っている他のリポジトリが外れる。
+一覧を作り直したい場合にだけ使う。
+
+確認:
+
+```bash
+for s in SIGNING_PFX_BASE64 SIGNING_PFX_PASSWORD SIGNING_THUMBPRINT; do
+  printf '%s -> ' "$s"
+  gh api "orgs/zero-platform-lab/actions/secrets/$s/repositories" \
+    --jq '[.repositories[].name] | join(", ")'
+done
 ```
 
 Web からなら Organization → Settings → Secrets and variables → Actions で、
