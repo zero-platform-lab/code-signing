@@ -139,11 +139,11 @@ $(cat THUMBPRINT.txt)
   1. GitHub の Organization Secrets に登録する
        SIGNING_PFX_BASE64    <- signing.pfx.b64 の中身
        SIGNING_PFX_PASSWORD  <- いま入れたパスワード
-       SIGNING_THUMBPRINT    <- 上の SHA-1 から空白を除いたもの (signtool が使う形)
+       SIGNING_THUMBPRINT    <- 上の SHA-1 から区切りを除いた 40 文字
+                                grep '^SHA-1' THUMBPRINT.txt | cut -d: -f2- | tr -d ': \n'
 
-     gh コマンドなら:
-       gh secret set SIGNING_PFX_BASE64 --org zero-platform-lab \\
-         --visibility selected --repos <対象リポジトリ> < signing.pfx.b64
+     手順は docs/setup-secrets.md にまとめてある。
+     admin:org スコープが要る (gh auth refresh -h github.com -s admin:org)
 
   2. signing.cer を公開用リポジトリか Release に置く
 
